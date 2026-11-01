@@ -14,6 +14,12 @@
   const PART_VALIDE_MIN = 0.9;    // part de la commune sans nuage pour garder une image
   const PART_REPLI = 0.5;         // seuil de repli quand moins de deux images sont dégagées
   const RAYON_SITE_M = 100;       // voisinage d'un lieu sensible
+  const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://maps.mail.ru/osm/tools/overpass/api/interpreter", "https://overpass-api.de/api/interpreter", "https://maps.mail.ru/osm/tools/overpass/api/interpreter"];
+  const FRAIS_MIN_HA = 0.5;       // surface minimale d'un lieu de fraîcheur (parc, jardin public, bois)
+  const PROCHE_FRAIS_M = 300;     // proximité d'un lieu de fraîcheur (cinq minutes à pied environ)
+  const MARGE_FRAIS_M = 400;      // les lieux situés juste au-delà de la limite communale comptent aussi
+  const ECART_FRAIS = -1;         // °C sous la médiane pour parler de fraîcheur mesurée
+  const EMPRISE_MAX_KM2 = 900;    // au-delà, pas de requête OpenStreetMap en direct
   const TYPES = {
     ecole: { nom: "École", pluriel: "écoles (maternelles, élémentaires, primaires)", lettre: "É" },
     creche: { nom: "Crèche", pluriel: "crèches et autres accueils du jeune enfant", lettre: "C" },
@@ -173,9 +179,10 @@
     }
     if (couches.carreaux) { if ($("#voir-carreaux").checked) couches.carreaux.addTo(carte); else carte.removeLayer(couches.carreaux); }
     if (couches.sites) { if ($("#voir-sites").checked) couches.sites.addTo(carte); else carte.removeLayer(couches.sites); }
+    if (couches.frais) { if ($("#voir-frais").checked) couches.frais.addTo(carte); else carte.removeLayer(couches.frais); }
     majLegende(fond);
   }
-  for (const s of ['input[name="fond"]', "#voir-carreaux", "#voir-sites", "#opacite"]) {
+  for (const s of ['input[name="fond"]', "#voir-carreaux", "#voir-sites", "#voir-frais", "#opacite"]) {
     document.querySelectorAll(s).forEach((el) => el.addEventListener("input", majAffichage));
   }
 
@@ -201,6 +208,11 @@
       blocs.push(`<div class="bloc"><div class="titre">Lieux sensibles</div><div class="puces">
         ${Object.entries(TYPES).map(([k, t]) => `<span><span class="puce ${k}">${t.lettre}</span> ${t.nom}</span>`).join("")}
         <span><span class="puce chaud">!</span> dans le cinquième le plus chaud</span></div></div>`);
+    }
+    if (d && d.frais && $("#voir-frais").checked) {
+      blocs.push(`<div class="bloc"><div class="titre">Lieux de fraîcheur (parcs, jardins publics, bois d'au moins ${fmt(FRAIS_MIN_HA, 1)} ha)</div><div class="puces">
+        <span><span class="aplat" style="background:rgba(27,175,122,.5)"></span> plus frais que la médiane d'au moins ${fmt(-ECART_FRAIS)} °C</span>
+        <span><span class="aplat" style="background:rgba(27,175,122,.18)"></span> autres</span></div></div>`);
     }
     $("#legende").innerHTML = blocs.join("");
   }
@@ -563,6 +575,236 @@
     return groupe;
   }
 
+  // ---------- Lieux de fraîcheur (OpenStreetMap) ----------
+  async function overpass(requete, serveurs, delaiS, pauseS) {
+    let derniere = null;
+    for (const serveur of serveurs) {
+      if (derniere && pauseS) await new Promise((suite) => setTimeout(suite, pauseS * 1000));
+      const arret = new AbortController();
+      const minuteur = setTimeout(() => arret.abort(), delaiS * 1000);
+      try {
+        const r = await fetch(serveur, { method: "POST", body: "data=" + encodeURIComponent(requete), headers: { "Content-Type": "application/x-www-form-urlencoded" }, signal: arret.signal });
+        if (!r.ok) throw new Error("réponse " + r.status);
+        const d = await r.json();
+        if (d.remark && /error|timed out/i.test(d.remark)) throw new Error(d.remark);
+        return d;
+      } catch (e) { derniere = e; } finally { clearTimeout(minuteur); }
+    }
+    throw new Error(derniere && derniere.name === "AbortError" ? "délai dépassé" : String(derniere && derniere.message));
+  }
+  // Parcs, jardins publics et bois ; « out geom » donne aussi la géométrie des membres des relations.
+  function requeteFraicheur(bb) {
+    return `[out:json][timeout:90][bbox:${bb}];
+    (
+      way["leisure"~"^(park|garden|nature_reserve)$"]; way["landuse"="forest"]; way["natural"="wood"];
+      relation["leisure"~"^(park|garden|nature_reserve)$"]; relation["landuse"="forest"]; relation["natural"="wood"];
+    );
+    out geom;`;
+  }
+  function margeEmprise(b, m) {
+    const dLat = m / 111320, dLon = m / (111320 * Math.cos(((b[1] + b[3]) / 2) * Math.PI / 180));
+    return [b[0] - dLon, b[1] - dLat, b[2] + dLon, b[3] + dLat];
+  }
+  const utmDe = (lon, lat) => `+proj=utm +zone=${Math.floor((lon + 180) / 6) + 1}${lat < 0 ? " +south" : ""} +datum=WGS84 +units=m +no_defs`;
+  // Relevé enregistré pour les territoires d'exemple (R/05_fraicheur.R), sinon requête en direct.
+  async function chargerFraicheur(code, commune) {
+    const r = await fetch(`data/fraicheur/${code}.json`).catch(() => null);
+    if (r && r.ok) return Object.assign(await r.json(), { enregistre: true });
+    const b = margeEmprise(commune.bbox, MARGE_FRAIS_M);
+    const km2 = (b[2] - b[0]) * 111.32 * Math.cos(((b[1] + b[3]) / 2) * Math.PI / 180) * (b[3] - b[1]) * 111.32;
+    if (km2 > EMPRISE_MAX_KM2) throw new Error("territoire trop étendu pour une requête en direct");
+    return overpass(requeteFraicheur([b[1], b[0], b[3], b[2]].map((v) => v.toFixed(5)).join(",")), OVERPASS, 60, 3);
+  }
+  // Abscisses où une ligne horizontale coupe les arêtes (règle pair-impair : trous et anneaux en morceaux gérés).
+  function coupures(aretes, y) {
+    const xs = [];
+    for (const a of aretes) if ((a[1] > y) !== (a[3] > y)) xs.push(a[0] + (y - a[1]) * (a[2] - a[0]) / (a[3] - a[1]));
+    return xs.sort((p, q) => p - q);
+  }
+  function dansAretes(aretes, x, y) {
+    let n = 0;
+    for (const a of aretes) if ((a[1] > y) !== (a[3] > y) && x < a[0] + (y - a[1]) * (a[2] - a[0]) / (a[3] - a[1])) n++;
+    return n % 2 === 1;
+  }
+  function distanceLieu(l, x, y, limite) {
+    if (x < l.x0 - limite || x > l.x1 + limite || y < l.y0 - limite || y > l.y1 + limite) return Infinity;
+    if (dansAretes(l.aretes, x, y)) return 0;
+    let mini = Infinity;
+    for (const [ax, ay, bx, by] of l.aretes) {
+      const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)) : 0;
+      const dd = Math.hypot(x - ax - t * dx, y - ay - t * dy);
+      if (dd < mini) mini = dd;
+    }
+    return mini;
+  }
+  function analyserFraicheur(osm, d) {
+    const commune = d.commune, ch = d.chaleur, [b0, b1, b2, b3] = commune.bbox;
+    const P = proj4("EPSG:4326", ch ? ch.utm : utmDe((b0 + b2) / 2, (b1 + b3) / 2));
+    const tous = [];
+    for (const e of osm.elements || []) {
+      const t = e.tags || {};
+      if (t.access === "private" || t.access === "no" || /^(residential|private)$/.test(t["garden:type"] || "")) continue;
+      const traits = [];
+      if (e.type === "way" && e.geometry && e.geometry.length > 3) {
+        const p = e.geometry[0], q = e.geometry[e.geometry.length - 1];
+        if (Math.abs(p.lat - q.lat) < 1e-6 && Math.abs(p.lon - q.lon) < 1e-6) traits.push({ role: "outer", pts: e.geometry });
+      } else if (e.type === "relation" && e.members) {
+        for (const m of e.members) if (m.geometry && m.geometry.length > 1) traits.push({ role: m.role, pts: m.geometry });
+      }
+      if (!traits.length) continue;
+      const aretes = [];
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const tr of traits) {
+        let prec = null;
+        for (const pt of tr.pts) {
+          const q = P.forward([pt.lon, pt.lat]);
+          if (prec) aretes.push([prec[0], prec[1], q[0], q[1]]);
+          prec = q;
+          if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1];
+        }
+      }
+      // Surface et point représentatif : lignes horizontales tous les 5 m.
+      let surface = 0, sx = 0, sy = 0;
+      for (let y = y0 + 2.5; y < y1; y += 5) {
+        const xs = coupures(aretes, y);
+        for (let k = 0; k + 1 < xs.length; k += 2) { const lg = xs[k + 1] - xs[k]; surface += lg * 5; sx += (xs[k] + xs[k + 1]) / 2 * lg * 5; sy += y * lg * 5; }
+      }
+      if (surface < FRAIS_MIN_HA * 10000) continue;
+      let cx = sx / surface, cy = sy / surface;
+      if (!dansAretes(aretes, cx, cy)) {   // forme en croissant : on prend le milieu de la ligne la plus longue
+        let meilleur = -1;
+        for (let y = y0 + 2.5; y < y1; y += 5) { const xs = coupures(aretes, y); for (let k = 0; k + 1 < xs.length; k += 2) if (xs[k + 1] - xs[k] > meilleur) { meilleur = xs[k + 1] - xs[k]; cx = (xs[k] + xs[k + 1]) / 2; cy = y; } }
+      }
+      const g = P.inverse([cx, cy]);
+      const l = { nom: t.name || "", type: (t.landuse === "forest" || t.natural === "wood") ? "bois" : "parc", surface, aretes, traits, x0, y0, x1, y1, lon: g[0], lat: g[1], code: codeEn(commune, g[0], g[1]), ecart: NaN, ndvi: NaN, pixels: 0 };
+      // Température de surface mesurée sur les pixels Landsat dont le centre est dans le lieu.
+      if (ch) {
+        let sl = 0, nl = 0, sn = 0, nn = 0;
+        const lA = Math.max(0, Math.floor((ch.haut - y1) / 30)), lB = Math.min(ch.H - 1, Math.ceil((ch.haut - y0) / 30));
+        for (let li = lA; li <= lB; li++) {
+          const xs = coupures(aretes, ch.haut - (li + 0.5) * 30);
+          for (let k = 0; k + 1 < xs.length; k += 2) {
+            const cA = Math.max(0, Math.ceil((xs[k] - ch.gauche) / 30 - 0.5)), cB = Math.min(ch.W - 1, Math.floor((xs[k + 1] - ch.gauche) / 30 - 0.5));
+            for (let c = cA; c <= cB; c++) {
+              const i = li * ch.W + c;
+              if (ch.lst[i] === ch.lst[i]) { sl += ch.lst[i]; nl++; }
+              if (ch.ndvi[i] === ch.ndvi[i]) { sn += ch.ndvi[i]; nn++; }
+            }
+          }
+        }
+        if (nl >= 4) { l.ecart = sl / nl - ch.mediane; l.pixels = nl; }
+        if (nn >= 4) l.ndvi = sn / nn;
+      }
+      l.frais = l.ecart <= ECART_FRAIS;
+      tous.push(l);
+    }
+    // Un jardin dans un parc, un bois dans un parc : on ne garde dans la liste que le plus grand.
+    tous.sort((a, b) => b.surface - a.surface);
+    const gardes = [];
+    for (const l of tous) {
+      const [x, y] = P.forward([l.lon, l.lat]);
+      if (!gardes.some((m) => dansAretes(m.aretes, x, y))) gardes.push(l);
+    }
+    const lieux = gardes.filter((l) => l.code);
+    const plusProche = (lon, lat) => {
+      const [x, y] = P.forward([lon, lat]);
+      let mini = Infinity;
+      for (const l of tous) { const dd = distanceLieu(l, x, y, 1500); if (dd < mini) mini = dd; if (!mini) break; }
+      return mini;
+    };
+    const proches = { ind: 0, ages: 0, jeunes: 0 };
+    if (d.carreaux) for (const c of d.carreaux.cellules) {
+      const lat = c.coins.reduce((s, q) => s + q[0], 0) / 4, lon = c.coins.reduce((s, q) => s + q[1], 0) / 4;
+      c.distFrais = plusProche(lon, lat);
+      if (c.distFrais <= PROCHE_FRAIS_M) { proches.ind += c.ind; proches.ages += c.ages; proches.jeunes += c.jeunes; }
+    }
+    for (const s of d.sites || []) s.distFrais = plusProche(s.lon, s.lat);
+    return { tous, lieux, proches, enregistre: !!osm.enregistre, date: osm.date || null };
+  }
+  function coucheFraicheur(d) {
+    const groupe = L.featureGroup();
+    for (const l of d.frais.tous) {
+      const infobulle = `<div class="infobulle"><b>${echappe(l.nom || (l.type === "bois" ? "Bois" : "Parc ou jardin public") + " sans nom")}</b><br>
+        ${l.type === "bois" ? "Bois" : "Parc ou jardin public"} · ${fmt(l.surface / 10000, 1)} ha<br>
+        ${isFinite(l.ecart) ? `Surface : ${signe(l.ecart)} °C par rapport à la médiane${l.frais ? " (fraîcheur mesurée)" : ""}` : "Température de surface non mesurée"}</div>`;
+      const style = { color: "#0e7a52", weight: 1.5, fillColor: "#1baf7a", fillOpacity: l.frais ? 0.5 : 0.18 };
+      for (const tr of l.traits) {
+        if (tr.role === "inner") continue;
+        const ll = tr.pts.map((q) => [q.lat, q.lon]), a = tr.pts[0], b = tr.pts[tr.pts.length - 1];
+        const ferme = tr.pts.length > 3 && Math.abs(a.lat - b.lat) < 1e-7 && Math.abs(a.lon - b.lon) < 1e-7;
+        (ferme ? L.polygon(ll, style) : L.polyline(ll, { color: style.color, weight: 1.5 })).bindTooltip(infobulle, { sticky: true }).addTo(groupe);
+      }
+    }
+    return groupe;
+  }
+
+  // ---------- Actions proposées (règles fixes, les mêmes pour tous les territoires) ----------
+  function proposerActions(d) {
+    const A = [], ch = d.chaleur, ca = d.carreaux, f = d.frais, sites = d.sites || [];
+    const ajouter = (priorite, theme, lieu, constat, proposition, partenaire, lon, lat) => A.push({ priorite, theme, lieu, constat, proposition, partenaire, lon: lon == null ? null : lon, lat: lat == null ? null : lat });
+    const ha = (m2) => fmt(m2 / 10000, 1) + " ha";
+    if (ch) {
+      // Écoles et crèches dans le cinquième le plus chaud, les plus chaudes d'abord.
+      const enfants = sites.filter((s) => s.chaud && (s.type === "ecole" || s.type === "creche"));
+      for (const s of enfants.slice(0, 8)) ajouter(s.ndvi < 0.2 ? 1 : 2, "Établissements sensibles", `${s.nom} (${TYPES[s.type].nom.toLowerCase()})`,
+        `Surface ${signe(s.lst - ch.mediane)} °C par rapport à la médiane dans un rayon de ${RAYON_SITE_M} m ; NDVI ${fmt(s.ndvi, 2)}${s.ndvi < 0.2 ? " (abords très minéraux)" : ""}`,
+        s.type === "ecole" ? "Désimperméabiliser et ombrager la cour (arbres, pleine terre, revêtements clairs), protéger les classes du soleil ; ouvrir la cour aux habitants l'été" : "Ombrager l'espace extérieur, protéger les salles du soleil, vérifier le dispositif de rafraîchissement",
+        s.type === "ecole" ? "Direction de l'éducation ; direction des bâtiments" : "Direction de la petite enfance ; direction des bâtiments", s.lon, s.lat);
+      if (enfants.length > 8) ajouter(2, "Établissements sensibles", `${fmt(enfants.length - 8)} autres écoles et crèches`, "Également dans le cinquième le plus chaud (liste complète dans l'export des lieux sensibles)", "Même démarche, à programmer après les établissements ci-dessus", "Direction de l'éducation ; direction de la petite enfance");
+      for (const s of sites.filter((s) => s.chaud && s.type === "ehpad")) ajouter(1, "Établissements sensibles", s.nom,
+        `Hébergement pour personnes âgées dans le cinquième le plus chaud${s.capacite ? ", " + fmt(s.capacite) + " places" : ""} ; surface ${signe(s.lst - ch.mediane)} °C par rapport à la médiane`,
+        "Vérifier avec l'établissement son plan bleu et son dispositif de rafraîchissement ; végétaliser et ombrager les abords", "Établissement ; CCAS ; Agence régionale de santé", s.lon, s.lat);
+    }
+    if (ch && ca) {
+      const forts = ca.cellules.filter((c) => c.score >= 80).sort((a, b) => b.score - a.score);
+      if (forts.length) {
+        const somme = (k) => forts.reduce((s, c) => s + c[k], 0), avecT = forts.filter((c) => isFinite(c.lst));
+        const top = forts[0], lat = top.coins.reduce((s, q) => s + q[0], 0) / 4, lon = top.coins.reduce((s, q) => s + q[1], 0) / 4;
+        ajouter(1, "Espace public", `${fmt(forts.length)} carreaux de priorité forte (carte, « Carreaux de priorité »)`,
+          `${fmt(somme("ind"))} habitants, dont ${fmt(somme("ages"))} de 65 ans ou plus ; surface ${signe(avecT.reduce((s, c) => s + c.lst, 0) / avecT.length - ch.mediane)} °C en moyenne par rapport à la médiane ; NDVI moyen ${fmt(avecT.reduce((s, c) => s + (isFinite(c.ndvi) ? c.ndvi : 0), 0) / avecT.length, 2)}`,
+          "Programmer plantations d'arbres, désimperméabilisation et ombrage des rues et des places de ces secteurs ; y prévoir fontaines et bancs à l'ombre", "Direction de l'espace public ; service des espaces verts ; bailleurs sociaux", lon, lat);
+      }
+      if (ca.tot.agesChaud > 0) ajouter(ca.tot.agesChaud >= 500 ? 1 : 2, "Canicule", "Habitants de 65 ans et plus des secteurs chauds",
+        `${fmt(ca.tot.agesChaud)} personnes de 65 ans ou plus vivent dans le cinquième le plus chaud du territoire`,
+        "Démarcher ces quartiers pour l'inscription au registre des personnes vulnérables (registre canicule) ; appels et visites pendant les alertes", "CCAS ; associations de quartier");
+    }
+    if (f && ca && ca.tot.ages > 0 && ca.tot.jeunes > 0) {
+      const loinA = 1 - f.proches.ages / ca.tot.ages, loinJ = 1 - f.proches.jeunes / ca.tot.jeunes, pire = Math.max(loinA, loinJ);
+      if (pire >= 0.2) ajouter(pire >= 0.4 ? 1 : 2, "Lieux de fraîcheur", `Quartiers sans lieu frais à moins de ${PROCHE_FRAIS_M} m`,
+        `${fmt(100 * loinA)} % des 65 ans et plus et ${fmt(100 * loinJ)} % des moins de 6 ans vivent à plus de ${PROCHE_FRAIS_M} m d'un parc, d'un jardin public ou d'un bois d'au moins ${fmt(FRAIS_MIN_HA, 1)} ha`,
+        "Ouvrir des lieux frais de proximité pendant les canicules (cours d'école, salles rafraîchies, parcs ouverts en soirée) ; créer des jardins de poche dans ces quartiers", "Direction de l'aménagement ; direction de l'éducation ; CCAS");
+      const loin = sites.filter((s) => (s.type === "creche" || s.type === "ehpad") && s.distFrais > PROCHE_FRAIS_M);
+      if (loin.length) ajouter(2, "Lieux de fraîcheur", `${fmt(loin.length)} crèche${loin.length > 1 ? "s" : ""} ou hébergement${loin.length > 1 ? "s" : ""} pour personnes âgées`,
+        `À plus de ${PROCHE_FRAIS_M} m de tout lieu de fraîcheur : ${loin.slice(0, 4).map((s) => s.nom).join(", ")}${loin.length > 4 ? "…" : ""}`,
+        "Prévoir un lieu frais de repli pour les sorties et les épisodes de canicule ; végétaliser les abords", "Direction de la petite enfance ; CCAS");
+      for (const l of f.lieux.filter((l) => l.surface >= 10000 && l.ecart > 0).slice(0, 3)) ajouter(3, "Lieux de fraîcheur", l.nom || `${l.type === "bois" ? "Bois" : "Espace vert"} sans nom (${ha(l.surface)})`,
+        `Surface ${signe(l.ecart)} °C par rapport à la médiane : ce lieu n'est pas plus frais que le reste du territoire (NDVI ${fmt(l.ndvi, 2)})`,
+        "Augmenter l'ombrage par les arbres, réduire les surfaces minérales, prévoir des points d'eau", "Service des espaces verts", l.lon, l.lat);
+    }
+    const climat = (id) => d.climat && d.climat.find((l) => l.id === id);
+    const s3 = climat("S3"), s2 = climat("S2"), r4 = climat("R4");
+    if (s3 && s3.h[1].med != null && s3.h[1].med >= 10) ajouter(2, "Canicule", "Tout le territoire",
+      `${fmt(s3.h[1].med)} jours de vague de chaleur par an attendus vers 2050, contre ${fmt(s3.ref)} sur 1976-2005${s2 && s2.h[1].med != null ? ` ; ${fmt(s2.h[1].med)} nuits chaudes au-dessus de 20 °C, contre ${fmt(s2.ref)}` : ""}`,
+      "Formaliser un plan de gestion des vagues de chaleur : horaires et conditions de travail des agents, événements, ouverture des lieux frais, information des habitants", "Direction générale des services ; CCAS ; préfecture");
+    if (r4 && r4.h[1].med != null && r4.h[1].med >= 20 && f && f.tous.some((l) => l.type === "bois" && l.code)) ajouter(2, "Feux de végétation", "Bois du territoire",
+      `${fmt(r4.h[1].med)} jours avec risque significatif de feu de végétation par an attendus vers 2050, contre ${fmt(r4.ref)} sur 1976-2005`,
+      "Vérifier les obligations de débroussaillement et l'accès des secours aux bois", "Service des espaces verts ; service départemental d'incendie et de secours");
+    const r = d.risques;
+    if (r) {
+      const nb = (re) => r.catnat.filter((c) => re.test(c.libelle)).reduce((s, c) => s + c.nb, 0);
+      const inond = nb(/inondation/i), sech = nb(/s[ée]cheresse/i);
+      const cumul = r.nbCommunes > 1 ? `, cumulés sur les ${r.nbCommunes} communes (un même épisode compte une fois par commune touchée)` : "";
+      if (inond >= 3) ajouter(2, "Inondation", "Zones inondables",
+        `${fmt(inond)} arrêtés de catastrophe naturelle pour inondation depuis 1982${cumul}${r.tri.length ? " ; territoire à risque important d'inondation" : ""}`,
+        "Croiser les zones inondables (plan de prévention, Géorisques) avec les écoles, crèches et hébergements pour personnes âgées ; mettre à jour le plan communal de sauvegarde", "Service des risques ; préfecture");
+      if (sech) ajouter(sech >= 3 ? 2 : 3, "Sécheresse", "Bâti sur sols argileux",
+        `${fmt(sech)} arrêté${sech > 1 ? "s" : ""} de catastrophe naturelle pour mouvements de terrain liés à la sécheresse depuis 1982${cumul}`,
+        "Suivre les fissures des bâtiments communaux, informer les propriétaires des règles de construction sur sols argileux", "Direction des bâtiments ; service de l'urbanisme");
+    }
+    return A.map((a, i) => Object.assign(a, { i })).sort((a, b) => a.priorite - b.priorite || a.i - b.i);
+  }
+
   // ---------- Risques connus (Géorisques) ----------
   async function chargerRisques(codes) {
     const appel = (chemin) => json(`${GEORISQUES}/${chemin}`).catch(() => null);
@@ -660,10 +902,10 @@
     const p = d.commune.properties, ch = d.chaleur, ca = d.carreaux, h = [];
     const G = p.groupe, duT = G ? "du territoire" : "de la commune", adjT = G ? "du territoire" : "communale";
     h.push(`<h2>${echappe(p.nom)}</h2>
-      <p class="sous-titre">${G ? `Groupement de ${G.nb} communes` : echappe(p.departement ? p.departement.nom + " (" + p.departement.code + ")" : "") + " · code INSEE " + p.code} · ${fmt(p.population)} habitants · ${fmt(p.surface / 100, 1)} km²</p>
+      <p class="sous-titre">${G ? `Groupement de ${G.nb} communes` : echappe(p.departement ? p.departement.nom + " (" + p.departement.code + ")" : "") + " · code INSEE " + p.code} · ${fmt(p.population)} habitants · ${fmt(p.surface / 100, 1)} km² · établi le ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" })} · outil conçu par Césarion Djonel</p>
       ${G ? `<p class="note">${G.noms.map(echappe).join(", ")}.${G.manquantes ? ` ${G.manquantes} commune(s) du groupement n'ont pas pu être chargées.` : ""}</p>` : ""}
       <div class="actions"><button id="imprimer">Imprimer ou enregistrer en PDF</button>
-      ${ca ? '<button id="csv-carreaux">Carreaux (CSV)</button>' : ""}${d.sites && d.sites.length ? '<button id="csv-sites">Lieux sensibles (CSV)</button>' : ""}</div>`);
+      ${d.actions && d.actions.length ? '<button id="csv-actions">Actions (CSV pour Excel)</button>' : ""}${ca ? '<button id="csv-carreaux">Carreaux (CSV)</button>' : ""}${d.sites && d.sites.length ? '<button id="csv-sites">Lieux sensibles (CSV)</button>' : ""}${d.frais && d.frais.lieux.length ? '<button id="csv-frais">Lieux de fraîcheur (CSV)</button>' : ""}</div>`);
 
     // Synthèse
     const phrases = [];
@@ -673,7 +915,21 @@
     if (ch && d.sites && d.sites.length) phrases.push(`${fmt(nChauds)} des ${fmt(d.sites.length)} lieux sensibles recensés sont dans ce cinquième le plus chaud.`);
     const s3 = d.climat && d.climat.find((l) => l.id === "S3");
     if (s3 && s3.h[1].med != null) phrases.push(`Météo-France attend ${fmt(s3.h[1].med)} jours de vague de chaleur par an à l'horizon 2050 (valeur médiane), contre ${fmt(s3.ref)} sur la période de référence.`);
+    const fr = d.frais;
+    if (fr && ca && ca.tot.ages > 0) phrases.push(`${fmt(100 * fr.proches.ages / ca.tot.ages)} % des habitants de 65 ans et plus vivent à moins de ${PROCHE_FRAIS_M} m d'un parc, d'un jardin public ou d'un bois d'au moins ${fmt(FRAIS_MIN_HA, 1)} ha.`);
     if (phrases.length) h.push(`<h3>En bref</h3><p>${phrases.join(" ")}</p>`);
+
+    // Actions
+    const ac = d.actions || [];
+    if (ac.length) {
+      const n1 = ac.filter((a) => a.priorite === 1).length;
+      h.push(`<h3>Actions proposées</h3>
+        <p>${fmt(ac.length)} action${ac.length > 1 ? "s" : ""}, dont ${fmt(n1)} de priorité 1. Elles découlent de règles fixes, appliquées de la même façon à tous les territoires, et sont à confronter à la connaissance du terrain des services.</p>
+        <div class="defile haut"><table class="table-actions"><thead><tr><th>Prio.</th><th>Lieu ou public</th><th>Constat</th><th>Proposition</th></tr></thead><tbody>
+        ${ac.map((a) => `<tr><td><span class="priorite p${a.priorite}">${a.priorite}</span></td><td>${echappe(a.lieu)}<span class="sous">${a.theme}</span></td><td>${echappe(a.constat)}</td><td>${echappe(a.proposition)}<span class="sous">Partenaires : ${echappe(a.partenaire)}</span></td></tr>`).join("")}
+        </tbody></table></div>
+        <p class="note">Priorité 1 : public très vulnérable directement exposé, ou plusieurs facteurs cumulés ; 2 : exposition notable ; 3 : amélioration. L'export pour Excel ajoute des colonnes vides pour le coût, l'échéance et le pilote.</p>`);
+    }
 
     // Chaleur et végétation
     h.push("<h3>1. Chaleur de surface et végétation</h3>");
@@ -725,14 +981,36 @@
     if (d.sites && d.sites.length) {
       const parType = Object.keys(TYPES).map((k) => { const l = d.sites.filter((s) => s.type === k); return `${fmt(l.length)} ${TYPES[k].pluriel}${ch ? ` (${fmt(l.filter((s) => s.chaud).length)} dans le cinquième le plus chaud)` : ""}`; });
       h.push(`<p>${parType.join(" ; ")}.</p>
-        <div class="defile"><table><thead><tr><th>Lieu</th><th>Type</th><th class="n">Capacité</th>${ch ? '<th class="n">Écart de surface</th><th class="n">NDVI</th>' : ""}</tr></thead><tbody>
-        ${d.sites.map((s) => `<tr><td>${echappe(s.nom)}${s.chaud ? ' <span class="etiquette chaud">secteur chaud</span>' : ""}</td><td>${TYPES[s.type].nom}</td><td class="n">${s.capacite ? fmt(s.capacite) : ""}</td>${ch ? `<td class="n">${signe(s.lst - ch.mediane)} °C</td><td class="n">${fmt(s.ndvi, 2)}</td>` : ""}</tr>`).join("")}
+        ${d.sites.length > 40 ? `<p class="note">${ch ? "Les 40 plus chauds" : "40 premiers"} sur ${fmt(d.sites.length)} ; liste complète dans l'export « Lieux sensibles ».</p>` : ""}        <div class="defile"><table><thead><tr><th>Lieu</th><th>Type</th><th class="n">Capacité</th>${ch ? '<th class="n">Écart de surface</th><th class="n">NDVI</th>' : ""}</tr></thead><tbody>
+        ${d.sites.slice(0, 40).map((s) => `<tr><td>${echappe(s.nom)}${s.chaud ? ' <span class="etiquette chaud">secteur chaud</span>' : ""}</td><td>${TYPES[s.type].nom}</td><td class="n">${s.capacite ? fmt(s.capacite) : ""}</td>${ch ? `<td class="n">${signe(s.lst - ch.mediane)} °C</td><td class="n">${fmt(s.ndvi, 2)}</td>` : ""}</tr>`).join("")}
         </tbody></table></div>
         <p class="note">Base permanente des équipements 2025 (INSEE). Écart et NDVI calculés dans un rayon de ${RAYON_SITE_M} m autour du point, par rapport à la médiane ${adjT}.</p>`);
     } else h.push('<p class="note">Aucune école, crèche ou hébergement pour personnes âgées localisé dans ce territoire.</p>');
 
+    // Lieux de fraîcheur
+    h.push("<h3>4. Lieux de fraîcheur</h3>");
+    if (fr) {
+      const part = (a, b) => b > 0 ? fmt(100 * a / b) + " %" : "n. d.";
+      const mesures = fr.lieux.filter((l) => isFinite(l.ecart)), frais = fr.lieux.filter((l) => l.frais);
+      h.push(`<div class="tuiles">
+        <div class="tuile"><div class="valeur">${fmt(fr.lieux.length)}</div><div class="libelle">parcs, jardins publics et bois d'au moins ${fmt(FRAIS_MIN_HA, 1)} ha${ch ? `, dont ${fmt(frais.length)} plus frais que la médiane d'au moins ${fmt(-ECART_FRAIS)} °C` : ""}</div></div>
+        ${ca ? `<div class="tuile"><div class="valeur">${part(fr.proches.ind, ca.tot.ind)}</div><div class="libelle">des habitants à moins de ${PROCHE_FRAIS_M} m de l'un d'eux</div></div>
+        <div class="tuile"><div class="valeur">${part(fr.proches.ages, ca.tot.ages)}</div><div class="libelle">des 65 ans et plus</div></div>
+        <div class="tuile"><div class="valeur">${part(fr.proches.jeunes, ca.tot.jeunes)}</div><div class="libelle">des moins de 6 ans</div></div>` : ""}
+      </div>`);
+      if (d.sites && d.sites.length) {
+        const loin = Object.keys(TYPES).map((k) => { const l = d.sites.filter((s) => s.type === k); return l.length ? `${fmt(l.filter((s) => s.distFrais > PROCHE_FRAIS_M).length)} ${TYPES[k].pluriel.split(" (")[0]} sur ${fmt(l.length)}` : null; }).filter(Boolean);
+        h.push(`<p>À plus de ${PROCHE_FRAIS_M} m de tout lieu de fraîcheur : ${loin.join(" ; ")}.</p>`);
+      }
+      const LISTE_MAX = 40;
+      if (fr.lieux.length) h.push(`${fr.lieux.length > LISTE_MAX ? `<p class="note">Les ${LISTE_MAX} plus grands sur ${fmt(fr.lieux.length)} ; liste complète dans l'export « Lieux de fraîcheur ».</p>` : ""}<div class="defile"><table><thead><tr><th>Lieu</th><th>Type</th><th class="n">Surface</th>${ch ? '<th class="n">Écart de surface</th><th class="n">NDVI</th>' : ""}</tr></thead><tbody>
+        ${fr.lieux.slice(0, LISTE_MAX).map((l) => `<tr><td>${echappe(l.nom || "sans nom")}${l.frais ? ' <span class="etiquette frais">fraîcheur mesurée</span>' : ""}</td><td>${l.type === "bois" ? "Bois" : "Parc ou jardin"}</td><td class="n">${fmt(l.surface / 10000, 1)} ha</td>${ch ? `<td class="n">${signe(l.ecart)} °C</td><td class="n">${fmt(l.ndvi, 2)}</td>` : ""}</tr>`).join("")}
+        </tbody></table></div>`);
+      h.push(`<p class="note">Parcs, jardins publics et bois cartographiés dans OpenStreetMap${fr.enregistre ? ` (relevé enregistré${fr.date ? " le " + fr.date.split("-").reverse().join("/") : ""})` : ""}, y compris ceux situés à moins de ${MARGE_FRAIS_M} m au-delà de la limite ${adjT}, qui comptent pour la proximité mais ne figurent pas dans la liste. Distances à vol d'oiseau depuis le centre de chaque carreau de 200 m ou depuis le lieu sensible. Les horaires d'ouverture, l'accès réel et les cimetières ne sont pas pris en compte.${ch ? " L'écart de surface est la moyenne des pixels Landsat du lieu, comparée à la médiane " + adjT + " ; il n'est pas calculé pour les lieux de moins de quatre pixels." : ""}</p>`);
+    } else h.push(`<p class="note">Lieux de fraîcheur indisponibles : ${echappe(d.erreurs.frais || "raison inconnue")}.</p>`);
+
     // Risques
-    h.push("<h3>4. Risques connus</h3>");
+    h.push("<h3>5. Risques connus</h3>");
     const r = d.risques;
     if (r) {
       h.push(`<ul class="liste-risques">${r.familles.map((f) => `<li>${echappe(f)}</li>`).join("") || "<li>Aucun risque recensé</li>"}</ul>`);
@@ -747,7 +1025,7 @@
     } else h.push('<p class="note">Le service Géorisques n\'a pas répondu.</p>');
 
     // Climat futur
-    h.push("<h3>5. Climat futur</h3>");
+    h.push("<h3>6. Climat futur</h3>");
     if (d.climat) {
       h.push(`<div class="tridents">${d.climat.slice(0, 3).map(trident).join("")}</div>
         <div class="defile"><table><thead><tr><th>Indicateur</th><th class="n">Référence</th><th class="n">2030</th><th class="n">2050</th><th class="n">2100</th></tr></thead><tbody>
@@ -763,12 +1041,19 @@
     $("#fiche-contenu").innerHTML = h.join("");
 
     $("#imprimer").onclick = () => window.print();
+    const cellule = (v) => { const s = String(v == null ? "" : v); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    if ($("#csv-actions")) $("#csv-actions").onclick = () => telecharger(`actions_${p.code}.csv`,
+      [["priorite", "theme", "lieu_ou_public", "constat", "proposition", "partenaires", "longitude", "latitude", "cout_estime", "echeance", "pilote", "etat_avancement"]]
+        .concat(d.actions.map((a) => [a.priorite, a.theme, a.lieu, a.constat, a.proposition, a.partenaire, nombre(a.lon, 5), nombre(a.lat, 5), "", "", "", ""].map(cellule))));
+    if ($("#csv-frais")) $("#csv-frais").onclick = () => telecharger(`lieux_fraicheur_${p.code}.csv`,
+      [["commune", "nom", "type", "surface_ha", "ecart_mediane_c", "ndvi", "fraicheur_mesuree", "longitude", "latitude"]]
+        .concat(d.frais.lieux.map((l) => [l.code, l.nom, l.type === "bois" ? "Bois" : "Parc ou jardin", nombre(l.surface / 10000, 2), nombre(l.ecart, 2), nombre(l.ndvi, 3), l.frais ? 1 : 0, nombre(l.lon, 5), nombre(l.lat, 5)].map(cellule))));
     if ($("#csv-carreaux")) $("#csv-carreaux").onclick = () => telecharger(`carreaux_${p.code}.csv`,
-      [["commune", "nord_m", "est_m", "epsg", "valeurs_estimees", "habitants", "menages", "menages_pauvres", "moins_6_ans", "65_ans_et_plus", "80_ans_et_plus", "temp_surface_c", "ecart_mediane_c", "ndvi", "cinquieme_chaud", "priorite"]]
-        .concat(ca.cellules.map((c) => [c.code, c.n, c.e, ca.epsg, c.estime ? 1 : 0, nombre(c.ind), nombre(c.men), nombre(c.pauv), nombre(c.jeunes), nombre(c.ages), nombre(c.ages80), nombre(c.lst, 2), ch ? nombre(c.lst - ch.mediane, 2) : "", nombre(c.ndvi, 3), c.chaud ? 1 : 0, nombre(c.score, 0)])));
+      [["commune", "nord_m", "est_m", "epsg", "valeurs_estimees", "habitants", "menages", "menages_pauvres", "moins_6_ans", "65_ans_et_plus", "80_ans_et_plus", "temp_surface_c", "ecart_mediane_c", "ndvi", "cinquieme_chaud", "priorite", "distance_lieu_fraicheur_m"]]
+        .concat(ca.cellules.map((c) => [c.code, c.n, c.e, ca.epsg, c.estime ? 1 : 0, nombre(c.ind), nombre(c.men), nombre(c.pauv), nombre(c.jeunes), nombre(c.ages), nombre(c.ages80), nombre(c.lst, 2), ch ? nombre(c.lst - ch.mediane, 2) : "", nombre(c.ndvi, 3), c.chaud ? 1 : 0, nombre(c.score, 0), isFinite(c.distFrais) ? Math.round(c.distFrais) : ""])));
     if ($("#csv-sites")) $("#csv-sites").onclick = () => telecharger(`lieux_sensibles_${p.code}.csv`,
-      [["commune", "nom", "type", "capacite", "longitude", "latitude", "temp_surface_c", "ecart_mediane_c", "ndvi", "cinquieme_chaud"]]
-        .concat(d.sites.map((s) => [s.code, '"' + s.nom.replace(/"/g, '""') + '"', TYPES[s.type].nom, s.capacite || "", s.lon, s.lat, nombre(s.lst, 2), ch ? nombre(s.lst - ch.mediane, 2) : "", nombre(s.ndvi, 3), s.chaud ? 1 : 0])));
+      [["commune", "nom", "type", "capacite", "longitude", "latitude", "temp_surface_c", "ecart_mediane_c", "ndvi", "cinquieme_chaud", "distance_lieu_fraicheur_m"]]
+        .concat(d.sites.map((s) => [s.code, '"' + s.nom.replace(/"/g, '""') + '"', TYPES[s.type].nom, s.capacite || "", s.lon, s.lat, nombre(s.lst, 2), ch ? nombre(s.lst - ch.mediane, 2) : "", nombre(s.ndvi, 3), s.chaud ? 1 : 0, isFinite(s.distFrais) ? Math.round(s.distFrais) : ""])));
   }
 
   // ---------- Territoire étudié : une commune, ou un groupement vu comme un seul territoire ----------
@@ -833,6 +1118,8 @@
       const pRisques = chargerRisques(codes).then((r) => { d.risques = r; if (!perime()) etape("risques", r ? "Risques connus (Géorisques)" : "Géorisques n'a pas répondu", r ? "ok" : "ko"); });
       etape("climat", "Projections climatiques (Météo-France)…");
       const pClimat = chargerClimat(commune.properties.code, deps[0], groupe).catch(() => null).then((c) => { d.climat = c; if (!perime()) etape("climat", c ? "Projections climatiques (Météo-France)" : "Pas de projection pour ce territoire", c ? "ok" : "ko"); });
+      etape("frais", "Parcs, jardins publics et bois (OpenStreetMap)…");
+      const pFrais = chargerFraicheur(code, commune).catch((e) => { d.erreurs.frais = e.message; return null; });
 
       try {
         d.chaleur = await calculerChaleur(commune, outreMer);
@@ -858,8 +1145,15 @@
       etape("sites", d.sites ? `Lieux sensibles (${fmt(d.sites.length)})` : "Lieux sensibles indisponibles", d.sites ? "ok" : "ko");
       if (d.sites) couches.sites = coucheSites(d);
 
+      const osm = await pFrais;
+      if (perime()) return;
+      try { d.frais = osm ? analyserFraicheur(osm, d) : null; } catch (e) { console.error(e); d.frais = null; d.erreurs.frais = e.message; }
+      etape("frais", d.frais ? `Lieux de fraîcheur (${fmt(d.frais.lieux.length)} parcs, jardins publics et bois${d.frais.enregistre ? ", relevé enregistré" : ""})` : "Lieux de fraîcheur indisponibles : " + (d.erreurs.frais || "raison inconnue"), d.frais ? "ok" : "ko");
+      if (d.frais) couches.frais = coucheFraicheur(d);
+
       await Promise.all([pRisques, pClimat]);
       if (perime()) return;
+      d.actions = proposerActions(d);
       majAffichage();
       rediger(d);
       d.termine = true;

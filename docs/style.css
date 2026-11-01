@@ -166,3 +166,17 @@ td .fourchette { color: var(--texte-2); font-size: .76rem; display: block; }
 }
 
 th.n { white-space: normal; }
+
+/* ---------- Actions et lieux de fraîcheur ---------- */
+.priorite { display: inline-block; min-width: 1.6em; text-align: center; font-weight: 650; border-radius: 4px; padding: 0 5px; border: 1px solid var(--trait); background: #fff; }
+.priorite.p1 { border-color: var(--alerte); color: var(--alerte); }
+.table-actions td { vertical-align: top; font-size: .86rem; }
+.defile.haut { max-height: 460px; }
+.etiquette.frais { border-color: #167048; color: #167048; }
+.legende .aplat { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid #0e7a52; vertical-align: middle; margin-right: 4px; }
+@media print {
+  .defile.haut { max-height: none; }
+  .table-actions { font-size: .78rem; }
+}
+.table-actions .sous { display: block; margin-top: 3px; color: var(--texte-2); font-size: .78rem; }
+.table-actions td:nth-child(2) { width: 24%; }

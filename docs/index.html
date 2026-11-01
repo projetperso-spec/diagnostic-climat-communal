@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Diagnostic de vulnérabilité climatique communal</title>
-<meta name="description" content="Tapez le nom d'une commune : carte et fiche croisant chaleur de surface, végétation, populations fragiles, lieux sensibles, risques connus et climat futur.">
+<meta name="description" content="Tapez le nom d'une commune : carte et fiche croisant chaleur de surface, végétation, populations fragiles, lieux sensibles, lieux de fraîcheur, risques connus et climat futur, avec une liste d'actions priorisées.">
+<meta name="author" content="Césarion Djonel">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314213d'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23e5806f'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="vendor/leaflet.css">
 <link rel="stylesheet" href="style.css">
@@ -14,7 +15,7 @@
 <header class="bandeau">
   <div class="bandeau-titre">
     <h1>Diagnostic de vulnérabilité climatique communal</h1>
-    <p>Chaleur de surface, végétation, populations fragiles, lieux sensibles, risques connus et climat futur, pour n'importe quelle commune ou intercommunalité.</p>
+    <p>Chaleur de surface, végétation, populations fragiles, lieux sensibles, lieux de fraîcheur, risques connus et climat futur, avec une liste d'actions priorisées, pour n'importe quelle commune ou intercommunalité.</p>
   </div>
   <form class="recherche" id="recherche" autocomplete="off" role="search">
     <label for="champ">Commune ou groupement de communes</label>
@@ -28,8 +29,9 @@
 <main>
   <section class="accueil" id="accueil">
     <h2>Choisissez une commune ou un groupement</h2>
-    <p>L'outil va chercher les données au moment de la demande : images satellite Landsat, carreaux de population de l'INSEE, équipements, risques recensés par l'État et projections de Météo-France. Comptez dix à trente secondes.</p>
+    <p>L'outil va chercher les données au moment de la demande : images satellite Landsat, carreaux de population de l'INSEE, équipements, risques recensés par l'État et projections de Météo-France. Comptez dix secondes à une minute.</p>
     <p class="exemples">Exemples :
+      <a href="#g200058782">Saint-Quentin-en-Yvelines (12 communes)</a>
       <a href="#93066">Saint-Denis</a>
       <a href="#g200057867">Plaine Commune (8 communes)</a>
       <a href="#94017">Champigny-sur-Marne</a>
@@ -51,6 +53,7 @@
           <legend>Par-dessus</legend>
           <label><input type="checkbox" id="voir-carreaux"> Carreaux de priorité</label>
           <label><input type="checkbox" id="voir-sites" checked> Lieux sensibles</label>
+          <label><input type="checkbox" id="voir-frais" checked> Lieux de fraîcheur</label>
         </fieldset>
         <label class="opacite">Opacité <input type="range" id="opacite" min="20" max="100" value="80"></label>
       </div>
@@ -66,7 +69,8 @@
 </main>
 
 <footer class="pied">
-  <p>Sources : USGS Landsat 8 et 9 (Collection 2, niveau 2, via Microsoft Planetary Computer) ; INSEE, Filosofi 2019 au carreau de 200 m et Base permanente des équipements 2025 ; Géorisques (ministère chargé de l'écologie, BRGM) ; Météo-France, Climadiag Commune ; contours et recherche : API Découpage administratif ; fond de carte : IGN.</p>
+  <p><b>Conception et réalisation : Césarion Djonel</b>, 2026 · <a href="https://github.com/projetperso-spec/diagnostic-climat-communal">méthode et code source</a></p>
+  <p>Sources : USGS Landsat 8 et 9 (Collection 2, niveau 2, via Microsoft Planetary Computer) ; INSEE, Filosofi 2019 au carreau de 200 m et Base permanente des équipements 2025 ; Géorisques (ministère chargé de l'écologie, BRGM) ; contributeurs OpenStreetMap (parcs, jardins, bois ; licence ODbL) ; Météo-France, Climadiag Commune ; contours et recherche : API Découpage administratif ; fond de carte : IGN.</p>
 </footer>
 
 <script src="vendor/leaflet.js"></script>
