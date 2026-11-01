@@ -24,7 +24,7 @@ cd docs
 python -m http.server 8765
 ```
 
-puis ouvrir http://127.0.0.1:8765. L'adresse garde le territoire : `http://127.0.0.1:8765/#93066` ouvre Saint-Denis, `#g200057867` ouvre Plaine Commune, `#g200058782` Saint-Quentin-en-Yvelines. En ligne, l'adresse https://projetperso-spec.github.io/diagnostic-climat-communal/saint-quentin-en-yvelines/ ouvre directement Saint-Quentin-en-Yvelines.
+puis ouvrir http://127.0.0.1:8765. L'adresse garde le territoire : `http://127.0.0.1:8765/#93066` ouvre Saint-Denis, `#g200057867` ouvre Plaine Commune, `#g200058782` Saint-Quentin-en-Yvelines. En ligne, l'adresse https://projetperso-spec.github.io/diagnostic-climat-communal/saint-quentin-en-yvelines/ ouvre directement Saint-Quentin-en-Yvelines, et https://projetperso-spec.github.io/diagnostic-climat-communal/grand-paris-sud/ Grand Paris Sud.
 
 Le site est fait de fichiers statiques : il se publie tel quel en déposant le dossier `docs/` chez un hébergeur de pages (environ 170 Mo, dont 166 Mo de données).
 
