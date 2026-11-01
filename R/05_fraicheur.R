@@ -5,7 +5,7 @@
 suppressPackageStartupMessages({ library(jsonlite); library(curl) })
 
 args <- commandArgs(trailingOnly = TRUE)
-codes <- if (length(args)) args else c("g200058782", "g200059228", "93066", "g200057867", "94017", "78551", "78190", "92024")
+codes <- if (length(args)) args else c("g200058782", "g200059228", "g200057974", "93066", "g200057867", "94017", "78551", "78190", "92024")
 MARGE_M <- 400   # même marge que MARGE_FRAIS_M dans docs/app.js
 SERVEURS <- c("https://overpass-api.de/api/interpreter", "https://maps.mail.ru/osm/tools/overpass/api/interpreter")
 GARDER <- c("name", "leisure", "landuse", "natural", "access", "garden:type")
